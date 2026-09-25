@@ -15,24 +15,41 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Hiragino Sans",sans-serif;color:var(--text)}
 body{min-height:100vh}
-.app{padding:calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 96px)}
+.app{padding:calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 104px)}
+.headerRow{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
 h1{font-size:26px;margin:0 0 4px}
-.note{font-size:13px;color:var(--sub);margin-bottom:12px}
+.note{font-size:13px;color:var(--sub);margin-bottom:12px;line-height:1.4}
+.addTier{
+  border:0;border-radius:10px;background:#eaf3ff;color:var(--blue);
+  font-size:14px;font-weight:700;padding:9px 11px;white-space:nowrap
+}
 .tierRow{
-  display:grid; grid-template-columns:48px 1fr; gap:8px;
-  background:var(--panel); border-radius:14px; padding:8px; margin-bottom:10px;
-  box-shadow:0 1px 3px rgba(0,0,0,.04)
+  display:grid; grid-template-columns:52px 1fr; gap:8px;
+  background:var(--panel); border-radius:14px; padding:8px 8px 16px; margin-bottom:10px;
+  box-shadow:0 1px 3px rgba(0,0,0,.04); position:relative
 }
 .tierLabel{
-  display:flex; align-items:center; justify-content:center;
-  font-size:24px; font-weight:800; border-right:1px solid var(--line)
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  font-size:22px; font-weight:800; border-right:1px solid var(--line); gap:8px
+}
+.sizeBtns{display:flex;gap:3px}
+.sizeBtns button{
+  width:22px;height:22px;border:0;border-radius:6px;background:#f2f2f7;color:#555;
+  font-size:16px;line-height:1;padding:0
 }
 .canvas{
-  position:relative; min-height:180px; border-radius:10px;
+  position:relative; min-height:100px; border-radius:10px;
   background:
     linear-gradient(to bottom, rgba(0,0,0,.035) 1px, transparent 1px);
   background-size:100% 36px;
   overflow:hidden;
+}
+.resizeHandle{
+  position:absolute;left:60px;right:10px;bottom:3px;height:10px;
+  display:flex;align-items:center;justify-content:center;touch-action:none
+}
+.resizeHandle::before{
+  content:"";width:54px;height:4px;border-radius:999px;background:#d1d1d6
 }
 .card{
   position:absolute; min-width:76px; max-width:180px;
@@ -73,17 +90,21 @@ input{
 .primary{background:#eef6ff;color:var(--blue)}
 .danger{background:#fff0ef;color:var(--danger)}
 .neutral{background:#f2f2f7;color:var(--text)}
-.help{
-  margin-top:8px;font-size:12px;color:var(--sub);line-height:1.4
-}
+.help{margin-top:8px;font-size:12px;color:var(--sub);line-height:1.4}
 </style>
 </head>
 <body>
 <div class="app">
-  <h1>Restaurant Tier Board</h1>
-  <div class="note">ドラッグでTier間・Tier内を自由配置 / 長押しで削除</div>
+  <div class="headerRow">
+    <div>
+      <h1>Restaurant Tier Board</h1>
+      <div class="note">店をドラッグで自由配置 / 下のつまみでTierの高さ変更</div>
+    </div>
+    <button class="addTier" id="addTierBtn">＋ Tier</button>
+  </div>
+
   <div id="board"></div>
-  <div class="help">配置はこのiPhoneのブラウザ内に保存されます。サーバーへ店名データは送信しません。</div>
+  <div class="help">Tierの高さ・追加したTier・店の位置は、このiPhoneのブラウザ内に保存されます。</div>
 </div>
 
 <div class="bottomBar">
@@ -103,12 +124,21 @@ input{
 </div>
 
 <script>
-const TIERS = ["S","A","B","C","D"];
-const STORAGE_KEY = "restaurantTierBoard.v2";
-const CANVAS_H = 180;
+const STORAGE_ITEMS = "restaurantTierBoard.items.v3";
+const STORAGE_TIERS = "restaurantTierBoard.tiers.v3";
+const DEFAULT_TIERS = [
+  {label:"1", height:180},
+  {label:"1.5", height:180},
+  {label:"2", height:180},
+  {label:"3", height:180},
+  {label:"4", height:180},
+  {label:"5", height:180}
+];
 
+let tiers = [];
 let items = [];
 let drag = null;
+let resize = null;
 let selectedId = null;
 let holdTimer = null;
 let holdStart = null;
@@ -116,50 +146,114 @@ let holdStart = null;
 const board = document.getElementById("board");
 const nameInput = document.getElementById("nameInput");
 const addBtn = document.getElementById("addBtn");
+const addTierBtn = document.getElementById("addTierBtn");
 const menu = document.getElementById("menu");
 const menuTitle = document.getElementById("menuTitle");
 
 function uid(){
-  return (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)+Math.random().toString(36).slice(2));
+  return crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)+Math.random().toString(36).slice(2);
+}
+
+function numericSort(a,b){
+  const na = Number(a.label), nb = Number(b.label);
+  if(!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+  return a.label.localeCompare(b.label, "ja", {numeric:true});
 }
 
 function load(){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const rawT = localStorage.getItem(STORAGE_TIERS);
+    tiers = rawT ? JSON.parse(rawT) : structuredClone(DEFAULT_TIERS);
+    if(!Array.isArray(tiers) || !tiers.length) tiers = structuredClone(DEFAULT_TIERS);
+  }catch(e){
+    tiers = structuredClone(DEFAULT_TIERS);
+  }
+
+  try{
+    let raw = localStorage.getItem(STORAGE_ITEMS);
+
+    // Migration from older versions.
+    if(!raw){
+      raw = localStorage.getItem("restaurantTierBoard.v2");
+    }
     items = raw ? JSON.parse(raw) : [];
     if(!Array.isArray(items)) items = [];
-  }catch(e){ items = []; }
+
+    const oldMap = {S:"1", A:"2", B:"3", C:"4", D:"5"};
+    for(const item of items){
+      if(oldMap[item.tier]) item.tier = oldMap[item.tier];
+      if(!tiers.some(t => t.label === String(item.tier))){
+        tiers.push({label:String(item.tier), height:180});
+      }
+    }
+    tiers.sort(numericSort);
+    saveAll();
+  }catch(e){
+    items = [];
+  }
 }
-function save(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+
+function saveAll(){
+  localStorage.setItem(STORAGE_ITEMS, JSON.stringify(items));
+  localStorage.setItem(STORAGE_TIERS, JSON.stringify(tiers));
 }
 
 function buildBoard(){
   board.innerHTML = "";
-  for(const tier of TIERS){
+
+  for(const tier of tiers){
     const row = document.createElement("div");
     row.className = "tierRow";
+    row.dataset.tier = tier.label;
 
     const label = document.createElement("div");
     label.className = "tierLabel";
-    label.textContent = tier;
+
+    const labelText = document.createElement("div");
+    labelText.textContent = tier.label;
+
+    const sizeBtns = document.createElement("div");
+    sizeBtns.className = "sizeBtns";
+
+    const minus = document.createElement("button");
+    minus.textContent = "−";
+    minus.onclick = () => changeTierHeight(tier.label, -36);
+
+    const plus = document.createElement("button");
+    plus.textContent = "＋";
+    plus.onclick = () => changeTierHeight(tier.label, 36);
+
+    sizeBtns.append(minus, plus);
+    label.append(labelText, sizeBtns);
 
     const canvas = document.createElement("div");
     canvas.className = "canvas";
-    canvas.dataset.tier = tier;
-    canvas.style.height = CANVAS_H + "px";
+    canvas.dataset.tier = tier.label;
+    canvas.style.height = Math.max(100, tier.height || 180) + "px";
 
-    row.append(label, canvas);
+    const handle = document.createElement("div");
+    handle.className = "resizeHandle";
+    handle.addEventListener("pointerdown", e => startResize(e, tier.label, row));
+    handle.addEventListener("pointermove", moveResize);
+    handle.addEventListener("pointerup", endResize);
+    handle.addEventListener("pointercancel", endResize);
+
+    row.append(label, canvas, handle);
     board.appendChild(row);
   }
+
   renderCards();
 }
 
 function renderCards(){
   document.querySelectorAll(".canvas").forEach(c => c.innerHTML = "");
+
   for(const item of items){
-    const canvas = document.querySelector(`.canvas[data-tier="${item.tier}"]`);
+    const canvas = [...document.querySelectorAll(".canvas")]
+      .find(c => c.dataset.tier === String(item.tier));
+
     if(!canvas) continue;
+
     const card = makeCard(item);
     canvas.appendChild(card);
     requestAnimationFrame(() => clampCard(item, card, canvas));
@@ -178,11 +272,13 @@ function makeCard(item){
   el.addEventListener("pointermove", e => movePointer(e, item, el));
   el.addEventListener("pointerup", e => endPointer(e, item, el));
   el.addEventListener("pointercancel", e => endPointer(e, item, el));
+
   return el;
 }
 
 function startPointer(e, item, el){
   const rect = el.getBoundingClientRect();
+
   drag = {
     id:item.id,
     el,
@@ -191,6 +287,7 @@ function startPointer(e, item, el){
     offsetY:e.clientY - rect.top,
     moved:false
   };
+
   holdStart = {x:e.clientX,y:e.clientY};
   el.setPointerCapture?.(e.pointerId);
   el.classList.add("dragging");
@@ -216,7 +313,6 @@ function movePointer(e, item, el){
     clearTimeout(holdTimer);
   }
 
-  // Find tier canvas currently under finger.
   el.style.pointerEvents = "none";
   const under = document.elementFromPoint(e.clientX, e.clientY);
   el.style.pointerEvents = "";
@@ -227,7 +323,6 @@ function movePointer(e, item, el){
   let x = e.clientX - canvasRect.left - drag.offsetX;
   let y = e.clientY - canvasRect.top - drag.offsetY;
 
-  // If crossing tiers, move DOM node immediately.
   if(el.parentElement !== canvas){
     canvas.appendChild(el);
     item.tier = canvas.dataset.tier;
@@ -235,62 +330,138 @@ function movePointer(e, item, el){
 
   const maxX = Math.max(0, canvas.clientWidth - el.offsetWidth);
   const maxY = Math.max(0, canvas.clientHeight - el.offsetHeight);
+
   x = Math.min(Math.max(0, x), maxX);
   y = Math.min(Math.max(0, y), maxY);
 
   el.style.left = x + "px";
   el.style.top = y + "px";
+
   item.x = x;
   item.y = y;
 }
 
 function endPointer(e, item, el){
   if(!drag || drag.id !== item.id) return;
+
   clearTimeout(holdTimer);
   holdTimer = null;
   el.classList.remove("dragging");
-  if(drag.moved){
-    save();
-  }
+
+  if(drag.moved) saveAll();
   drag = null;
 }
 
 function clampCard(item, card, canvas){
   const maxX = Math.max(0, canvas.clientWidth - card.offsetWidth);
   const maxY = Math.max(0, canvas.clientHeight - card.offsetHeight);
+
   item.x = Math.min(Math.max(0, Number(item.x ?? 8)), maxX);
   item.y = Math.min(Math.max(0, Number(item.y ?? 8)), maxY);
+
   card.style.left = item.x + "px";
   card.style.top = item.y + "px";
+}
+
+function startResize(e, tierLabel, row){
+  const tier = tiers.find(t => t.label === tierLabel);
+  if(!tier) return;
+
+  resize = {
+    pointerId:e.pointerId,
+    tierLabel,
+    startY:e.clientY,
+    startHeight:tier.height || 180,
+    row
+  };
+
+  e.currentTarget.setPointerCapture?.(e.pointerId);
+  e.preventDefault();
+}
+
+function moveResize(e){
+  if(!resize || e.pointerId !== resize.pointerId) return;
+
+  const tier = tiers.find(t => t.label === resize.tierLabel);
+  const canvas = resize.row.querySelector(".canvas");
+  if(!tier || !canvas) return;
+
+  const next = Math.max(100, Math.min(600, resize.startHeight + (e.clientY - resize.startY)));
+  tier.height = Math.round(next);
+  canvas.style.height = tier.height + "px";
+}
+
+function endResize(e){
+  if(!resize || e.pointerId !== resize.pointerId) return;
+
+  saveAll();
+  renderCards();
+  resize = null;
+}
+
+function changeTierHeight(label, delta){
+  const tier = tiers.find(t => t.label === label);
+  if(!tier) return;
+
+  tier.height = Math.max(100, Math.min(600, (tier.height || 180) + delta));
+  saveAll();
+  buildBoard();
+}
+
+function addTier(){
+  const value = prompt("追加するTier名を入力してください", "1.5");
+  if(value === null) return;
+
+  const label = value.trim();
+  if(!label) return;
+
+  if(tiers.some(t => t.label === label)){
+    alert("そのTierはすでにあります。");
+    return;
+  }
+
+  tiers.push({label, height:180});
+  tiers.sort(numericSort);
+  saveAll();
+  buildBoard();
 }
 
 function addShop(){
   const name = nameInput.value.trim();
   if(!name) return;
 
-  const cCanvas = document.querySelector('.canvas[data-tier="C"]');
-  const index = items.filter(x => x.tier === "C").length;
+  // New restaurants start in Tier 3 if available, otherwise the middle tier.
+  const defaultTier = tiers.some(t => t.label === "3")
+    ? "3"
+    : tiers[Math.floor(tiers.length/2)].label;
+
+  const canvas = [...document.querySelectorAll(".canvas")]
+    .find(c => c.dataset.tier === defaultTier);
+
+  const index = items.filter(x => String(x.tier) === defaultTier).length;
   const x = 8 + (index % 2) * 130;
   const y = 8 + Math.floor(index / 2) * 48;
 
   items.push({
     id:uid(),
     name,
-    tier:"C",
+    tier:defaultTier,
     x,
-    y:Math.min(y, CANVAS_H - 48)
+    y:Math.min(y, (canvas?.clientHeight || 180) - 48)
   });
+
   nameInput.value = "";
-  save();
+  saveAll();
   renderCards();
 }
 
 function deleteSelected(){
   if(!selectedId) return;
+
   items = items.filter(x => x.id !== selectedId);
-  save();
   selectedId = null;
   menu.classList.remove("show");
+  saveAll();
   renderCards();
 }
 
@@ -300,22 +471,22 @@ function closeMenu(){
 }
 
 addBtn.addEventListener("click", addShop);
+addTierBtn.addEventListener("click", addTier);
+
 nameInput.addEventListener("keydown", e => {
   if(e.key === "Enter") addShop();
 });
+
 document.getElementById("deleteBtn").addEventListener("click", deleteSelected);
 document.getElementById("cancelBtn").addEventListener("click", closeMenu);
+
 menu.addEventListener("click", e => {
   if(e.target === menu) closeMenu();
 });
 
 window.addEventListener("resize", () => {
-  document.querySelectorAll(".card").forEach(card => {
-    const item = items.find(x => x.id === card.dataset.id);
-    const canvas = card.parentElement;
-    if(item && canvas) clampCard(item, card, canvas);
-  });
-  save();
+  renderCards();
+  saveAll();
 });
 
 load();
