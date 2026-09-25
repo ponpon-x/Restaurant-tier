@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f2f2f7">
+<title>Restaurant Tier Board</title>
+<style>
+:root{
+  --bg:#f2f2f7; --panel:#fff; --text:#111; --sub:#6e6e73;
+  --line:#d1d1d6; --blue:#007aff; --danger:#ff3b30;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Hiragino Sans",sans-serif;color:var(--text)}
+body{min-height:100vh}
+.app{padding:calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 96px)}
+h1{font-size:26px;margin:0 0 4px}
+.note{font-size:13px;color:var(--sub);margin-bottom:12px}
+.tierRow{
+  display:grid; grid-template-columns:48px 1fr; gap:8px;
+  background:var(--panel); border-radius:14px; padding:8px; margin-bottom:10px;
+  box-shadow:0 1px 3px rgba(0,0,0,.04)
+}
+.tierLabel{
+  display:flex; align-items:center; justify-content:center;
+  font-size:24px; font-weight:800; border-right:1px solid var(--line)
+}
+.canvas{
+  position:relative; min-height:180px; border-radius:10px;
+  background:
+    linear-gradient(to bottom, rgba(0,0,0,.035) 1px, transparent 1px);
+  background-size:100% 36px;
+  overflow:hidden;
+}
+.card{
+  position:absolute; min-width:76px; max-width:180px;
+  min-height:40px; padding:9px 11px;
+  border:1px solid var(--line); background:#fff; border-radius:11px;
+  box-shadow:0 2px 6px rgba(0,0,0,.08);
+  font-size:14px; font-weight:650; line-height:1.2;
+  user-select:none; -webkit-user-select:none; touch-action:none;
+  display:flex; align-items:center; justify-content:center; text-align:center;
+}
+.card.dragging{transform:scale(1.03);box-shadow:0 8px 20px rgba(0,0,0,.18);z-index:999}
+.bottomBar{
+  position:fixed; left:10px; right:10px;
+  bottom:calc(env(safe-area-inset-bottom) + 8px);
+  padding:10px; border-radius:16px;
+  background:rgba(255,255,255,.94);
+  backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+  box-shadow:0 8px 30px rgba(0,0,0,.14);
+  display:grid; grid-template-columns:1fr auto; gap:8px; z-index:1000
+}
+input{
+  height:46px;border:1px solid var(--line);border-radius:11px;padding:0 12px;font-size:16px;outline:none;background:#fff
+}
+.addBtn{
+  height:46px;border:0;border-radius:11px;background:var(--blue);color:#fff;font-size:16px;font-weight:750;padding:0 16px
+}
+.overlay{
+  position:fixed; inset:0; background:rgba(0,0,0,.35);
+  display:none; align-items:flex-end; justify-content:center;
+  padding:0 12px calc(env(safe-area-inset-bottom) + 10px); z-index:3000
+}
+.overlay.show{display:flex}
+.sheet{width:min(520px,100%);background:#fff;border-radius:16px;padding:14px}
+.sheetTitle{text-align:center;font-weight:750;font-size:17px;margin-bottom:4px}
+.sheetSub{text-align:center;color:var(--sub);font-size:13px;margin-bottom:12px}
+.actions{display:grid;gap:8px}
+.actions button{height:46px;border:0;border-radius:11px;font-size:16px;font-weight:700}
+.primary{background:#eef6ff;color:var(--blue)}
+.danger{background:#fff0ef;color:var(--danger)}
+.neutral{background:#f2f2f7;color:var(--text)}
+.help{
+  margin-top:8px;font-size:12px;color:var(--sub);line-height:1.4
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Restaurant Tier Board</h1>
+  <div class="note">ドラッグでTier間・Tier内を自由配置 / 長押しで削除</div>
+  <div id="board"></div>
+  <div class="help">配置はこのiPhoneのブラウザ内に保存されます。サーバーへ店名データは送信しません。</div>
+</div>
+
+<div class="bottomBar">
+  <input id="nameInput" placeholder="お店の名前" autocomplete="off">
+  <button class="addBtn" id="addBtn">＋ 追加</button>
+</div>
+
+<div class="overlay" id="menu">
+  <div class="sheet">
+    <div class="sheetTitle" id="menuTitle"></div>
+    <div class="sheetSub">操作を選んでください</div>
+    <div class="actions">
+      <button class="danger" id="deleteBtn">削除</button>
+      <button class="neutral" id="cancelBtn">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TIERS = ["S","A","B","C","D"];
+const STORAGE_KEY = "restaurantTierBoard.v2";
+const CANVAS_H = 180;
+
+let items = [];
+let drag = null;
+let selectedId = null;
+let holdTimer = null;
+let holdStart = null;
+
+const board = document.getElementById("board");
+const nameInput = document.getElementById("nameInput");
+const addBtn = document.getElementById("addBtn");
+const menu = document.getElementById("menu");
+const menuTitle = document.getElementById("menuTitle");
+
+function uid(){
+  return (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)+Math.random().toString(36).slice(2));
+}
+
+function load(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY);
+    items = raw ? JSON.parse(raw) : [];
+    if(!Array.isArray(items)) items = [];
+  }catch(e){ items = []; }
+}
+function save(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+}
+
+function buildBoard(){
+  board.innerHTML = "";
+  for(const tier of TIERS){
+    const row = document.createElement("div");
+    row.className = "tierRow";
+
+    const label = document.createElement("div");
+    label.className = "tierLabel";
+    label.textContent = tier;
+
+    const canvas = document.createElement("div");
+    canvas.className = "canvas";
+    canvas.dataset.tier = tier;
+    canvas.style.height = CANVAS_H + "px";
+
+    row.append(label, canvas);
+    board.appendChild(row);
+  }
+  renderCards();
+}
+
+function renderCards(){
+  document.querySelectorAll(".canvas").forEach(c => c.innerHTML = "");
+  for(const item of items){
+    const canvas = document.querySelector(`.canvas[data-tier="${item.tier}"]`);
+    if(!canvas) continue;
+    const card = makeCard(item);
+    canvas.appendChild(card);
+    requestAnimationFrame(() => clampCard(item, card, canvas));
+  }
+}
+
+function makeCard(item){
+  const el = document.createElement("div");
+  el.className = "card";
+  el.textContent = item.name;
+  el.dataset.id = item.id;
+  el.style.left = (item.x ?? 8) + "px";
+  el.style.top  = (item.y ?? 8) + "px";
+
+  el.addEventListener("pointerdown", e => startPointer(e, item, el));
+  el.addEventListener("pointermove", e => movePointer(e, item, el));
+  el.addEventListener("pointerup", e => endPointer(e, item, el));
+  el.addEventListener("pointercancel", e => endPointer(e, item, el));
+  return el;
+}
+
+function startPointer(e, item, el){
+  const rect = el.getBoundingClientRect();
+  drag = {
+    id:item.id,
+    el,
+    pointerId:e.pointerId,
+    offsetX:e.clientX - rect.left,
+    offsetY:e.clientY - rect.top,
+    moved:false
+  };
+  holdStart = {x:e.clientX,y:e.clientY};
+  el.setPointerCapture?.(e.pointerId);
+  el.classList.add("dragging");
+
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => {
+    if(drag && !drag.moved){
+      selectedId = item.id;
+      menuTitle.textContent = item.name;
+      menu.classList.add("show");
+      navigator.vibrate?.(20);
+    }
+  }, 650);
+}
+
+function movePointer(e, item, el){
+  if(!drag || drag.id !== item.id) return;
+
+  const dx = e.clientX - holdStart.x;
+  const dy = e.clientY - holdStart.y;
+  if(Math.hypot(dx,dy) > 8){
+    drag.moved = true;
+    clearTimeout(holdTimer);
+  }
+
+  // Find tier canvas currently under finger.
+  el.style.pointerEvents = "none";
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  el.style.pointerEvents = "";
+  const canvas = under?.closest?.(".canvas");
+  if(!canvas) return;
+
+  const canvasRect = canvas.getBoundingClientRect();
+  let x = e.clientX - canvasRect.left - drag.offsetX;
+  let y = e.clientY - canvasRect.top - drag.offsetY;
+
+  // If crossing tiers, move DOM node immediately.
+  if(el.parentElement !== canvas){
+    canvas.appendChild(el);
+    item.tier = canvas.dataset.tier;
+  }
+
+  const maxX = Math.max(0, canvas.clientWidth - el.offsetWidth);
+  const maxY = Math.max(0, canvas.clientHeight - el.offsetHeight);
+  x = Math.min(Math.max(0, x), maxX);
+  y = Math.min(Math.max(0, y), maxY);
+
+  el.style.left = x + "px";
+  el.style.top = y + "px";
+  item.x = x;
+  item.y = y;
+}
+
+function endPointer(e, item, el){
+  if(!drag || drag.id !== item.id) return;
+  clearTimeout(holdTimer);
+  holdTimer = null;
+  el.classList.remove("dragging");
+  if(drag.moved){
+    save();
+  }
+  drag = null;
+}
+
+function clampCard(item, card, canvas){
+  const maxX = Math.max(0, canvas.clientWidth - card.offsetWidth);
+  const maxY = Math.max(0, canvas.clientHeight - card.offsetHeight);
+  item.x = Math.min(Math.max(0, Number(item.x ?? 8)), maxX);
+  item.y = Math.min(Math.max(0, Number(item.y ?? 8)), maxY);
+  card.style.left = item.x + "px";
+  card.style.top = item.y + "px";
+}
+
+function addShop(){
+  const name = nameInput.value.trim();
+  if(!name) return;
+
+  const cCanvas = document.querySelector('.canvas[data-tier="C"]');
+  const index = items.filter(x => x.tier === "C").length;
+  const x = 8 + (index % 2) * 130;
+  const y = 8 + Math.floor(index / 2) * 48;
+
+  items.push({
+    id:uid(),
+    name,
+    tier:"C",
+    x,
+    y:Math.min(y, CANVAS_H - 48)
+  });
+  nameInput.value = "";
+  save();
+  renderCards();
+}
+
+function deleteSelected(){
+  if(!selectedId) return;
+  items = items.filter(x => x.id !== selectedId);
+  save();
+  selectedId = null;
+  menu.classList.remove("show");
+  renderCards();
+}
+
+function closeMenu(){
+  selectedId = null;
+  menu.classList.remove("show");
+}
+
+addBtn.addEventListener("click", addShop);
+nameInput.addEventListener("keydown", e => {
+  if(e.key === "Enter") addShop();
+});
+document.getElementById("deleteBtn").addEventListener("click", deleteSelected);
+document.getElementById("cancelBtn").addEventListener("click", closeMenu);
+menu.addEventListener("click", e => {
+  if(e.target === menu) closeMenu();
+});
+
+window.addEventListener("resize", () => {
+  document.querySelectorAll(".card").forEach(card => {
+    const item = items.find(x => x.id === card.dataset.id);
+    const canvas = card.parentElement;
+    if(item && canvas) clampCard(item, card, canvas);
+  });
+  save();
+});
+
+load();
+buildBoard();
+</script>
+</body>
+</html>
